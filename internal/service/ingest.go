@@ -106,6 +106,14 @@ func (s *Service) IngestBatch(ctx context.Context, region string, batch model.In
 		}
 		if tag.RowsAffected() == 0 {
 			res.Duplicates++
+			// Record the repeated reception so spatial summaries can prove
+			// dedupe instead of silently relying on the unique index.
+			if _, err := tx.Exec(ctx, `
+				insert into segment_dedup_log (device_serial, segment_id, batch_id, content_sha256)
+				values ($1,$2,$3,$4)`,
+				op.DeviceSerial, op.SegmentID, batch.BatchID, sha256Hex(jsonBytes(op))); err != nil {
+				return res, err
+			}
 			continue
 		}
 		nextJournal++
@@ -116,6 +124,20 @@ func (s *Service) IngestBatch(ctx context.Context, region string, batch model.In
 			insert into devices (device_serial, device_type, first_seen_node)
 			values ($1,$2,$3) on conflict (device_serial) do nothing`,
 			op.DeviceSerial, op.OperationType, activeNode); err != nil {
+			return res, err
+		}
+		var width any
+		if op.WorkingWidthM > 0 {
+			width = op.WorkingWidthM
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into operation_spatial_meta
+			  (operation_id, device_serial, segment_id, working_width_m, accuracy_m, point_accuracy)
+			values ($1,$2,$3,$4,$5,$6)
+			on conflict (operation_id) do update
+			  set working_width_m=excluded.working_width_m, accuracy_m=excluded.accuracy_m,
+			      point_accuracy=excluded.point_accuracy, updated_at=now()`,
+			opID, op.DeviceSerial, op.SegmentID, width, op.AccuracyM, jsonBytes(op.PointAccuracyM)); err != nil {
 			return res, err
 		}
 
@@ -215,6 +237,22 @@ func validateOperation(op model.OperationInput, now time.Time) error {
 	for _, p := range op.Points {
 		if p.Lat < -90 || p.Lat > 90 || p.Lon < -180 || p.Lon > 180 {
 			return fmt.Errorf("trajectory point out of range")
+		}
+	}
+	if op.WorkingWidthM < 0 {
+		return fmt.Errorf("working_width_m must be non-negative")
+	}
+	if op.AccuracyM < 0 {
+		return fmt.Errorf("accuracy_m must be non-negative")
+	}
+	if len(op.PointAccuracyM) > 0 {
+		if len(op.PointAccuracyM) != len(op.Points) {
+			return fmt.Errorf("point_accuracy_m length must match points (%d)", len(op.Points))
+		}
+		for _, a := range op.PointAccuracyM {
+			if a < 0 {
+				return fmt.Errorf("point accuracy must be non-negative")
+			}
 		}
 	}
 	for _, a := range op.Alarms {

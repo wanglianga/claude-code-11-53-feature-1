@@ -37,6 +37,9 @@
 | 切换只从已确认位置续传 | failover 删除 `unconfirmed`、把游标回绕到 `dr_registry.last_confirmed_seq` |
 | 撤回即阻断 | deliver 事务外重新读取审批与政策；`artifact` 仅在全部检查通过时生成 |
 | 报表可自证 | artifact 按字节存 `text` + SHA-256；`/deliveries/{id}/verify` 复算并校验审计条目；`/audit/verify` 校验整链 |
+| 空间产物无原始轨迹 | 切段/栅格只在区域库执行；outbox 仅放行 `spatial_summary` 消毒产物；集团库无边界环、无逐点精度、无顺序点；交付前再扫字节 |
+| 模糊片段不猜边 | 不确定圆盘跨县 → `uncertainty_crosses_boundary` 待分配并记录候选县与县级上界；宽度缺失/边界无效/目录外同样待分配；重复片段只去重不加倍 |
+| 修订可追溯 | 边界版本与政策不可变更新（`superseded` 保留）；新摘要 `supersedes` 旧摘要，历史报表保留原边界哈希与粒度 |
 
 ## 2. 失败模式与行为
 
@@ -71,6 +74,42 @@
 - 链式哈希：`hash = sha256(canonical{seq, occurred_at(μs), actor, role, action, subject, region, decision, detail, prev_hash})`。
 - `detail` 入库前 JSON 归一化（等价于 jsonb 往返后的形态），避免写读差异。
 - 任何行被改写：`prev_hash` 与上一条不符或内容哈希不符 → `/audit/verify` 返回 `valid=false`、`broken_at=<seq>`。
+
+### 2.6 区域内空间聚合与出境粒度证明
+
+```
+区域库（原始轨迹 + 边界环 + 精度，均不出境）
+  boundary_versions/boundary_counties（版本化，boundary_sha256）
+  spatial_policies（boundary_version × method(intersection|raster) × grain(county|grid)）
+  operation_spatial_meta（working_width_m、accuracy_m、point_accuracy_m）
+        │
+        ▼  ComputeSpatialSummary（纯 Go 引擎 internal/geo）
+  ┌─ intersection：折线×多边形精确相交，段长×宽度按县分摊
+  └─ raster：Amanatides-Woo 网格遍历，批准分辨率累计，顶点模糊性向格子传播
+        │
+        ├─ 明确片段 → spatial_summaries.bins（县码/不透明网格号 + 面积/时长/覆盖长度/上界）
+        ├─ 模糊/缺宽度/无效边界/目录外 → pending + excluded_fragments（候选县，无坐标）
+        └─ spatial_segment_ledger（逐片段长度/面积/候选县/内容哈希）+ segment_dedup_log（去重证据）
+        │ outbox(spatial_summary) —— 驻留政策过滤（raw_trajectory 仍阻断）
+        ▼
+控制面库 replica_spatial_summaries（artifact 原始字节 + sha256，confirmed 后集团可见）
+        │ POST /spatial/deliveries（审批/驻留/粒度/受限字段/哈希逐项复核）
+        ▼
+spatial_deliveries + 审计链；GET /spatial/deliveries/{id}/verify 复算证明
+```
+
+待分配规则（面积先挂起，绝不任选一侧）：
+
+| 触发条件 | pending reason | 解除方式 |
+| --- | --- | --- |
+| 定位不确定圆盘跨越多个县/触到边界 | `uncertainty_crosses_boundary` | 更高精度轨迹补传后重算；期间以 `area_ha_max` 给保守上界 |
+| 作业宽度缺失（`working_width_m=0/null`） | `working_width_missing` | `POST .../spatial/width-backfill` 后重算 |
+| 政策绑定的边界版本被宣告无效 | `boundary_version_invalid` | 发布新边界与新政策后重算 |
+| 轨迹落在边界目录覆盖范围外 | `outside_boundary_catalog` | 扩充边界目录后重算 |
+| 同一片段重复接收 | 不入汇总，写 `segment_dedup_log` | 去重计数随摘要输出 `duplicate_count` |
+
+边界更正或轨迹补传都生成**新摘要行**并 `supersedes` 旧行；县级与网格粒度各有独立谱系，历史集团报表始终能说明其采用的
+`boundary_version_id`、`boundary_sha256`、`method` 与 `output_grain`。
 
 ## 3. 权限模型
 

@@ -1,0 +1,6 @@
+{
+  "boundary_version_id": "bdv_br_mt_1",
+  "output_grain": "county",
+  "method": "intersection",
+  "default_accuracy_m": 2.0
+}

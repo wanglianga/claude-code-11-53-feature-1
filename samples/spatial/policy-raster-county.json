@@ -1,0 +1,7 @@
+{
+  "boundary_version_id": "bdv_br_mt_1",
+  "output_grain": "county",
+  "method": "raster",
+  "grid_size_m": 200,
+  "default_accuracy_m": 2.0
+}

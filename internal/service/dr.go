@@ -49,7 +49,7 @@ func (s *Service) Failover(ctx context.Context, region string, reconcile bool, a
 	}
 
 	discarded := map[string]int{}
-	for _, table := range []string{"replica_op_summaries", "replica_trajectories", "replica_alarms", "replica_metrics"} {
+	for _, table := range []string{"replica_op_summaries", "replica_trajectories", "replica_alarms", "replica_metrics", "replica_spatial_summaries"} {
 		var n int
 		if err := tx.QueryRow(ctx, fmt.Sprintf(
 			`with del as (delete from %s where source_region=$1 and status='unconfirmed' returning 1)

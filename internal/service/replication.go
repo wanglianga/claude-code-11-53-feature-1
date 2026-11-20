@@ -232,6 +232,10 @@ func (s *Service) applyReplicas(ctx context.Context, region string, events []out
 			if err := applyMetric(ctx, tx, region, e); err != nil {
 				return 0, err
 			}
+		case "spatial_summary":
+			if err := applySpatialSummary(ctx, tx, region, e); err != nil {
+				return 0, err
+			}
 		default:
 			return 0, fmt.Errorf("unknown outbox category %q", e.Cat)
 		}
@@ -352,6 +356,47 @@ func applyMetric(ctx context.Context, tx pgx.Tx, region string, e outboxEvent) e
 	return err
 }
 
+// applySpatialSummary copies a sanitised in-region spatial summary. Only the
+// outbound artifact (county/grid bins at the approved grain) reaches the
+// control plane; boundary rings, point-level accuracy and cut pieces stay in
+// the region.
+func applySpatialSummary(ctx context.Context, tx pgx.Tx, region string, e outboxEvent) error {
+	var p struct {
+		SummaryID         string    `json:"summary_id"`
+		PolicyID          string    `json:"policy_id"`
+		BoundaryVersionID string    `json:"boundary_version_id"`
+		BoundarySHA256    string    `json:"boundary_sha256"`
+		Method            string    `json:"method"`
+		OutputGrain       string    `json:"output_grain"`
+		GridSizeM         *int      `json:"grid_size_m"`
+		PeriodFrom        time.Time `json:"period_from"`
+		PeriodTo          time.Time `json:"period_to"`
+		OperationType     string    `json:"operation_type"`
+		Artifact          string    `json:"artifact"`
+		ArtifactSHA256    string    `json:"artifact_sha256"`
+	}
+	if err := json.Unmarshal(e.Payload, &p); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `
+		insert into replica_spatial_summaries (source_region, summary_id, source_seq, policy_id,
+			boundary_version_id, boundary_sha256, method, output_grain, grid_size_m, period_from,
+			period_to, operation_type, artifact, artifact_sha256, source_node, status, copied_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'unconfirmed',now())
+		on conflict (source_region, summary_id) do update
+		  set source_seq=excluded.source_seq, policy_id=excluded.policy_id,
+		      boundary_version_id=excluded.boundary_version_id, boundary_sha256=excluded.boundary_sha256,
+		      method=excluded.method, output_grain=excluded.output_grain, grid_size_m=excluded.grid_size_m,
+		      period_from=excluded.period_from, period_to=excluded.period_to,
+		      operation_type=excluded.operation_type, artifact=excluded.artifact,
+		      artifact_sha256=excluded.artifact_sha256, source_node=excluded.source_node,
+		      copied_at=excluded.copied_at`,
+		region, p.SummaryID, e.Seq, p.PolicyID, p.BoundaryVersionID, p.BoundarySHA256, p.Method,
+		p.OutputGrain, p.GridSizeM, p.PeriodFrom.UTC(), p.PeriodTo.UTC(), p.OperationType,
+		p.Artifact, p.ArtifactSHA256, e.Node)
+	return err
+}
+
 // discardUncopied removes replica rows written past the region's confirmed
 // position by a failed attempt. Nothing above the confirmed seq was visible to
 // the group, so deleting it restores exactly the last confirmed view.
@@ -371,7 +416,7 @@ func (s *Service) discardUncopied(ctx context.Context, region string, upto int64
 		return 0, tx.Commit(ctx)
 	}
 	total := 0
-	for _, table := range []string{"replica_op_summaries", "replica_trajectories", "replica_alarms", "replica_metrics"} {
+	for _, table := range []string{"replica_op_summaries", "replica_trajectories", "replica_alarms", "replica_metrics", "replica_spatial_summaries"} {
 		var n int
 		if err := tx.QueryRow(ctx, fmt.Sprintf(
 			`with del as (delete from %s where source_region=$1 and status='unconfirmed' and source_seq>$2 returning 1)
@@ -412,6 +457,7 @@ func (s *Service) confirmReplicas(ctx context.Context, region string, toSeq int6
 		`update replica_trajectories set status='confirmed' where source_region=$1 and source_seq<=$2`,
 		`update replica_alarms set status='confirmed' where source_region=$1 and source_seq<=$2`,
 		`update replica_metrics set status='confirmed' where source_region=$1 and source_seq<=$2`,
+		`update replica_spatial_summaries set status='confirmed' where source_region=$1 and source_seq<=$2`,
 	} {
 		if _, err := tx.Exec(ctx, q, region, toSeq); err != nil {
 			return 0, err

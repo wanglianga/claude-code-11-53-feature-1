@@ -33,6 +33,14 @@ type OperationInput struct {
 	EndedAt       *time.Time `json:"ended_at"`
 	Points        []GeoPoint `json:"points"`
 	Alarms        []Alarm    `json:"alarms"`
+	// WorkingWidthM is the implement width used to turn trajectory length into
+	// worked area. A missing/zero width means the segment cannot be spatially
+	// apportioned until the width is backfilled; its area stays pending.
+	WorkingWidthM float64 `json:"working_width_m,omitempty"`
+	// AccuracyM is the default positional uncertainty radius in metres for the
+	// segment. PointAccuracyM, when present, overrides it per sampled point.
+	AccuracyM      float64   `json:"accuracy_m,omitempty"`
+	PointAccuracyM []float64 `json:"point_accuracy_m,omitempty"`
 }
 
 type IngestBatch struct {

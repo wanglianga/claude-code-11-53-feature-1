@@ -66,6 +66,25 @@
 - 审计账本为哈希链（`prev_hash` + 规范化 payload），落库前对 `detail` 做 JSON 归一化、时间截断到微秒，
   保证"写入时哈希 == 读回后重算哈希"；任何越权改库都会被 `GET /audit/verify` 定位到具体行号。
 
+### 1.8 区域内空间聚合：原始轨迹不出境，县级/网格粒度可证明
+
+部分国家禁止精确设备轨迹离境，但集团仍需按县比较播种、收割、施肥的已完成面积。空间聚合**全部在区域库内完成**，
+集团只能取得获准粒度（县级或批准分辨率网格）的汇总及其不确定范围：
+
+- **空间目录与政策同一来源**：`boundary_versions`（带 SHA-256 的版本化行政边界）+ `spatial_policies`
+  （边界版本 × 分配方法 × 输出粒度的唯一绑定）；目录、切段/栅格、出境聚合与审计交付引用同一行政策与边界版本。
+- **两种区域内分配方法**（纯 Go 几何引擎 `internal/geo`，无 PostGIS 依赖）：
+  - `intersection`：轨迹折线与批准行政边界**精确相交**切段，按段长 × 作业宽度分摊面积，解释细、适合地块少的精确记录；
+  - `raster`：在批准分辨率（最小 100 m）上栅格化累计网格覆盖，批量汇总更快、输出粒度易审计，县界/窄地块处存在量化误差。
+- **不确定范围不猜边**：每个采样点带定位精度半径；不确定圆盘跨越多县（或触到边界）的片段标记 `uncertainty_crosses_boundary`
+  并列为**待分配**，同时给出候选县与县级保守上界 `area_ha_max`；作业宽度缺失 → `working_width_missing` 待分配，
+  补传宽度后重算；边界版本无效 → 全部面积 `boundary_version_invalid` 待分配；同一片段重复接收 → 去重日志计数，绝不加倍。
+- **出境产物消毒**：outbox 新增 `spatial_summary` 类别，复制仍逐事件按驻留政策过滤；产物只含县码/不透明网格号
+  （网格地理锚点留在区域内）、面积/时长/覆盖长度、待分配原因与边界/政策哈希，**不含顺序点、坐标或未批准细网格**；
+  交付前对确切字节再做受限字段扫描与哈希校验（`POST /spatial/deliveries`、`GET /spatial/deliveries/{id}/verify`）。
+- **修订可追溯**：边界更正上传新版本（相同几何幂等返回原版本），旧版本 `superseded` 保留；重算生成新摘要并
+  `supersedes` 链接旧摘要，历史集团报表仍能说明当时采用的边界版本与粒度。
+
 ---
 
 ## 2. 快速启动
@@ -104,7 +123,7 @@ REPLICATION_INTERVAL=5s go run ./cmd/server
 ### 2.3 一键验证
 
 ```bash
-make verify            # go build + vet + 单元测试 + 起临时服务 + 105 项验收断言
+make verify            # go build + vet + 单元测试 + 起临时服务 + 161 项验收断言
 # 或对已运行实例：
 ./scripts/replay.sh http://localhost:8080
 ```
@@ -147,8 +166,13 @@ Swagger UI 中点击 **Authorize** 填入上述任一 token 即可调用。
 | `dr/us-ia-post-switch.json` | 主备切换后在新主节点继续上传 |
 | `approvals/wide.json` | 四区域 × 全指标的出境申请 |
 | `approvals/narrow.json` | 三区域（DE-BB/BR-MT/US-IA）× 3 指标的窄范围申请 |
+| `approvals/spatial.json` | BR-MT × `spatial_area_ha` 的空间出境申请 |
+| `spatial/br-mt-boundaries-v1.json`、`-v2.json` | BR-MT 两县边界目录 v1 与修订版 v2（县界东移 0.001°） |
+| `spatial/br-mt-batch-a.json` | 跨县直线、县界低精度（60 m）、缺作业宽度三个片段 |
+| `spatial/br-mt-batch-b.json` | 重传 SP-CROSS-1（去重）+ 新增 SP-CLEAN-2 |
+| `spatial/policy-*.json` | 精确相交/县级、栅格/县级、栅格/网格、边界 v2 四套空间政策 |
 
-重新生成：`python3 scripts/gen_samples.py`。
+重新生成：`python3 scripts/gen_samples.py`、`python3 scripts/gen_spatial_samples.py`。
 
 ---
 
@@ -164,11 +188,12 @@ Swagger UI 中点击 **Authorize** 填入上述任一 token 即可调用。
 | 审批撤回 | 撤回后交付 `status=blocked`、`artifact=null`、无 `artifact_sha256`、原因为 `approval_status`；窄范围申请越权指标在聚合阶段 `403` |
 | 出境审计 | 存储字节重算哈希一致、`restricted_fields` 为空、审计条目与整链校验通过；**越权改库后** `audit/verify` 返回 `valid=false` 且 `broken_at` 指向被改行 |
 | 权限边界 | 无/错 token 401；区域操作员跨区 403；分析员自批 403；操作员触发全局复制/切换 403；集团分析读取区域原始记录 403；审计员可读区域记录用于审计 |
+| 区域内空间聚合 | 跨县直线按长度×宽度分摊入两县；低精度界片段待分配并列出双候选县；宽度缺失待分配、补传后重算；重复片段去重不加倍；边界修订生成链接新摘要、旧摘要保留原粒度；无效边界全部待分配；栅格策略只出批准网格、县级策略不出网格；集团副本字节无 `lat/lon/points` 键；空间交付哈希/受限字段/审计链校验通过，撤回后阻断且 artifact 为 null |
 
-一次完整运行的实际结果（`make verify`，2026-11-18 在本容器内执行）：
+一次完整运行的实际结果（`make verify`，2026-11-20 在本容器内执行）：
 
 ```
-checks passed: 105, failed: 0
+checks passed: 161, failed: 0
 ALL CHECKS PASSED
 ```
 
@@ -176,11 +201,13 @@ ALL CHECKS PASSED
 
 ## 6. API 一览
 
-完整定义见 `GET /openapi.json`（OpenAPI 3.0.3，34 路径 / 36 操作），交互文档见 `/docs`。
+完整定义见 `GET /openapi.json`（OpenAPI 3.0.3，45 路径），交互文档见 `/docs`。
 
 | 分组 | 接口 |
 | --- | --- |
 | 区域 | `POST /regions/{region}/ingest`、`GET /regions/{region}/status`、`GET /regions/{region}/operations`、`GET /regions/{region}/journal/verify`、`GET /regions` |
+| 区域空间 | `GET/POST /regions/{region}/spatial/boundaries`、`POST .../boundaries/invalidate`、`GET/POST .../spatial/policies`、`GET/POST .../spatial/summaries`、`GET .../spatial/summaries/{sid}`、`GET .../spatial/summaries/{sid}/ledger`、`POST .../spatial/width-backfill`、`GET .../spatial/dedup-log` |
+| 集团空间 | `GET /spatial/summaries`、`GET/POST /spatial/deliveries`、`GET /spatial/deliveries/{id}/verify` |
 | 复制 | `POST /replication/run`、`POST /replication/batch`、`GET /replication/cursors`、`GET /replication/runs`、`GET/POST /replication/links[/{region}]`、`GET /replication/policies`、`GET /replication/replicas` |
 | 出境申请 | `GET/POST /outbound/requests`、`GET /outbound/requests/{id}`、`POST .../decide`、`POST .../revoke` |
 | 聚合 | `GET/POST /aggregates`、`GET /aggregates/{id}` |
@@ -222,6 +249,29 @@ curl -s localhost:8080/deliveries/$DLV/verify -H 'Authorization: Bearer demo-aud
 curl -s localhost:8080/audit/verify -H 'Authorization: Bearer demo-auditor-token' | jq -c .
 ```
 
+空间链路（区域内聚合 → 政策过滤复制 → 集团交付，全程无原始坐标出境）：
+
+```bash
+OPR='Authorization: Bearer demo-operator-br-mt'
+# 1) 区域内：边界目录（版本化+哈希）与空间政策（方法×粒度）
+curl -s -XPOST localhost:8080/regions/BR-MT/spatial/boundaries -H "$OPR" \
+  -H 'Content-Type: application/json' --data-binary @samples/spatial/br-mt-boundaries-v1.json
+curl -s -XPOST localhost:8080/regions/BR-MT/spatial/policies -H "$OPR" \
+  -H 'Content-Type: application/json' --data-binary @samples/spatial/policy-intersection-county.json
+# 2) 区域内：上传跨县/低精度/缺宽度片段（重复片段自动去重）
+curl -s -XPOST localhost:8080/regions/BR-MT/ingest -H "$OPR" \
+  -H 'Content-Type: application/json' --data-binary @samples/spatial/br-mt-batch-a.json
+# 3) 区域内：计算可出境摘要（bins + pending + excluded_fragments，原始点不出区域库）
+SPS=$(curl -s -XPOST localhost:8080/regions/BR-MT/spatial/summaries -H "$OPR" \
+  -H 'Content-Type: application/json' \
+  -d '{"period_from":"2026-11-06T00:00:00Z","period_to":"2026-11-30T00:00:00Z"}' | jq -r .summary_id)
+curl -s localhost:8080/regions/BR-MT/spatial/summaries/$SPS/ledger -H "$OPR" | jq -c .
+# 4) 复制只放行 spatial_summary；raw_trajectory 仍被驻留政策阻断
+curl -s -XPOST localhost:8080/replication/run -H "$A" -H 'Content-Type: application/json' -d '{"region":"BR-MT"}'
+# 5) 集团侧只能读到消毒后的批准粒度产物
+curl -s 'localhost:8080/spatial/summaries?region=BR-MT' -H 'Authorization: Bearer demo-analyst-token' | jq -c .
+```
+
 ---
 
 ## 8. 配置项
@@ -246,13 +296,15 @@ curl -s localhost:8080/audit/verify -H 'Authorization: Bearer demo-auditor-token
 
 ```
 cmd/server/            服务入口（含 -healthcheck 子命令，供 distroless 健康检查）
-internal/api/          HTTP 路由、鉴权、OpenAPI 文档、后台复制器
-internal/service/      区域写入/去重、复制、聚合、审批与交付、容灾、审计链
+internal/api/          HTTP 路由、鉴权、OpenAPI 文档、后台复制器、空间 API
+internal/geo/          纯 Go 空间几何引擎（投影、精确相交切段、不确定判定、Amanatides-Woo 栅格化）
+internal/service/      区域写入/去重、复制、聚合、空间目录/切段/出境聚合、审批与交付、容灾、审计链
 internal/db/           PostgreSQL 连接池（每库一个）、schema、种子、重置
 internal/config/       区域/令牌/连接串配置
+internal/model/        通用模型与空间模型（区域内视图与集团消毒产物分离）
 web/swagger-ui/        内置 Swagger UI 资产（离线可用，Apache-2.0，见 LICENSE/NOTICE）
-samples/               多区域、断网补传、重试重叠、切换后续传、不同授权范围
-scripts/               gen_samples.py、replay.sh（断言）、demo.sh（演示）、verify.sh
+samples/               多区域、断网补传、重试重叠、切换后续传、不同授权范围、空间五场景
+scripts/               gen_samples.py、gen_spatial_samples.py、patch_openapi.py、replay.sh（断言）、demo.sh、verify.sh
 docs/architecture.md   数据流与失败模式说明
 ```
 

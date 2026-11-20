@@ -1,0 +1,49 @@
+{
+  "note": "BR-MT county border v1: shared edge at lon -55.420",
+  "counties": [
+    {
+      "county_code": "MT-C1",
+      "county_name": "Campo Oeste",
+      "ring": [
+        [
+          -12.63,
+          -55.43
+        ],
+        [
+          -12.63,
+          -55.42
+        ],
+        [
+          -12.65,
+          -55.42
+        ],
+        [
+          -12.65,
+          -55.43
+        ]
+      ]
+    },
+    {
+      "county_code": "MT-C2",
+      "county_name": "Campo Leste",
+      "ring": [
+        [
+          -12.63,
+          -55.42
+        ],
+        [
+          -12.63,
+          -55.41
+        ],
+        [
+          -12.65,
+          -55.41
+        ],
+        [
+          -12.65,
+          -55.42
+        ]
+      ]
+    }
+  ]
+}

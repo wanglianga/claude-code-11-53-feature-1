@@ -52,6 +52,8 @@ func normalizeMetrics(metrics []string) ([]string, error) {
 	allowed := map[string]bool{
 		"operation_count": true, "completed_count": true, "completion_rate": true,
 		"area_ha": true, "fuel_l": true, "duration_hours": true,
+		// Spatial egress metric: the grain-bound county/grid area summary.
+		"spatial_area_ha": true,
 	}
 	if len(metrics) == 0 {
 		return nil, fmt.Errorf("%w: scope_metrics is required", ErrInvalid)

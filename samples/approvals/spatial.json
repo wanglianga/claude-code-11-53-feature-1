@@ -1,0 +1,11 @@
+{
+  "purpose": "County-level completed area comparison under data residency rules",
+  "recipient": "group-agronomy@example.org",
+  "scope_regions": [
+    "BR-MT"
+  ],
+  "scope_metrics": [
+    "spatial_area_ha"
+  ],
+  "valid_until": "2026-12-31T23:59:59Z"
+}

@@ -43,6 +43,9 @@ func Open(ctx context.Context, cfg *config.Config) (*Manager, error) {
 	if err := m.ensureSchema(ctx, pool, "migrations/control.sql"); err != nil {
 		return nil, fmt.Errorf("control schema: %w", err)
 	}
+	if err := m.ensureSchema(ctx, pool, "migrations/control_spatial.sql"); err != nil {
+		return nil, fmt.Errorf("control spatial schema: %w", err)
+	}
 	for _, r := range cfg.Regions {
 		dbName := cfg.RegionDBName(r.Code)
 		if err := ensureDatabase(ctx, cfg, dbName); err != nil {
@@ -55,6 +58,10 @@ func Open(ctx context.Context, cfg *config.Config) (*Manager, error) {
 		if err := m.ensureSchema(ctx, rp, "migrations/region.sql"); err != nil {
 			rp.Close()
 			return nil, fmt.Errorf("region schema %s: %w", r.Code, err)
+		}
+		if err := m.ensureSchema(ctx, rp, "migrations/region_spatial.sql"); err != nil {
+			rp.Close()
+			return nil, fmt.Errorf("region spatial schema %s: %w", r.Code, err)
 		}
 		m.regions[r.Code] = rp
 	}
@@ -177,6 +184,7 @@ func (m *Manager) seedRegistry(ctx context.Context) error {
 			{"operation_summary", true, "allowed: aggregated work record without coordinates"},
 			{"device_alarm", true, "allowed: alarm codes without coordinates"},
 			{"aggregate_metric", true, "allowed: in-region aggregate approved for group reporting"},
+			{"spatial_summary", true, "allowed: county/grid-grain spatial aggregate; no points or fine cells leave the region"},
 		}
 		for _, row := range rows {
 			if _, err := tx.Exec(ctx, `
@@ -239,9 +247,9 @@ func (m *Manager) Close() {
 // mode by the HTTP layer.
 func (m *Manager) Reset(ctx context.Context) error {
 	tables := []string{
-		"deliveries", "aggregate_run_regions", "aggregate_runs", "outbound_requests",
-		"audit_events", "replication_runs", "replica_op_summaries", "replica_trajectories",
-		"replica_alarms", "replica_metrics",
+		"spatial_deliveries", "deliveries", "aggregate_run_regions", "aggregate_runs", "outbound_requests",
+		"audit_events", "replication_runs", "replica_spatial_summaries", "replica_op_summaries",
+		"replica_trajectories", "replica_alarms", "replica_metrics",
 	}
 	for _, t := range tables {
 		if _, err := m.control.Exec(ctx, "truncate table "+t+" restart identity cascade"); err != nil {
@@ -264,7 +272,9 @@ func (m *Manager) Reset(ctx context.Context) error {
 	for _, code := range m.RegionCodes() {
 		reg, _ := m.cfg.RegionByCode(code)
 		for _, q := range []string{
-			`truncate operation_events, journal_entries, outbox_events, metric_snapshots, ingest_receipts, devices`,
+			`truncate operation_events, journal_entries, outbox_events, metric_snapshots, ingest_receipts,
+			   devices, boundary_counties, boundary_versions, spatial_policies, operation_spatial_meta,
+			   segment_dedup_log, spatial_segment_ledger, spatial_summaries`,
 			fmt.Sprintf(`update region_state set local_epoch=1, next_journal_seq=1, next_outbox_seq=1,
 			   active_node=%s, updated_at=now()`, quoteLiteral(reg.PrimaryNode)),
 		} {

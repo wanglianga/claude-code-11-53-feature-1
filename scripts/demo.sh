@@ -69,3 +69,15 @@ get /dr/US-IA "$A" | jq -c '.registry|{active_node,standby_node,epoch,last_confi
 post /dr/US-IA/failover "$A" '{"reconcile":true}' | jq -c '{from_node,to_node,epoch,confirmed_seq,discarded_unconfirmed_rows,resumed_from_seq}'
 get /regions/US-IA/status "Authorization: Bearer demo-operator-us-ia" | jq -c '{active_node,epoch,journal_head,journal_entries,handover_ready}'
 post /dr/US-IA/failback "$A" '{}' | jq -c '{from_node,to_node,epoch}'
+
+hr "in-region spatial aggregation: cross-county, low accuracy, dedupe, revision"
+OPR="Authorization: Bearer demo-operator-br-mt"
+post /regions/BR-MT/spatial/boundaries "$OPR" "@$S/spatial/br-mt-boundaries-v1.json" | jq -c '{version_id,boundary_sha256,county_count}'
+post /regions/BR-MT/spatial/policies "$OPR" "@$S/spatial/policy-intersection-county.json" | jq -c '{policy_id,method,output_grain}'
+post /regions/BR-MT/ingest "$OPR" "@$S/spatial/br-mt-batch-a.json" | jq -c '{accepted,duplicates}'
+post /regions/BR-MT/ingest "$OPR" "@$S/spatial/br-mt-batch-b.json" | jq -c '{accepted,duplicates}'
+SPS=$(post /regions/BR-MT/spatial/summaries "$OPR" '{"period_from":"2026-11-06T00:00:00Z","period_to":"2026-11-30T00:00:00Z"}' | tee /tmp/sps.json | jq -r .summary_id)
+jq -c '{bins:.bins,pending:.pending,duplicates:.duplicate_count}' /tmp/sps.json
+get "/regions/BR-MT/spatial/summaries/$SPS/ledger" "$OPR" | jq -c '.ledger[]|{segment_id,status,allocated_area_ha,pending_area_ha,pending_reason}'
+post /replication/run "$A" '{"region":"BR-MT"}' | jq -c '{status,copied:.copied_by_category,blocked:.blocked_by_category}'
+get "/spatial/summaries?region=BR-MT" "$AN" | jq -c '.spatial_summaries[0]|{summary_id,output_grain,bins:(.bins|length),pending_total_ha,contains_raw_trajectories}'

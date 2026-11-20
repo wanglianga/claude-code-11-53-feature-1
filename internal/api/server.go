@@ -67,6 +67,8 @@ func (s *Server) Handler() http.Handler {
 	root.Handle("/aggregates", s.auth(s.mux))
 	root.Handle("/aggregates/", s.auth(s.mux))
 	root.Handle("/deliveries/", s.auth(s.mux))
+	root.Handle("/spatial", s.auth(s.mux))
+	root.Handle("/spatial/", s.auth(s.mux))
 	root.Handle("/dr", s.auth(s.mux))
 	root.Handle("/dr/", s.auth(s.mux))
 	root.Handle("/audit", s.auth(s.mux))
@@ -83,6 +85,23 @@ func (s *Server) routes() {
 	m.HandleFunc("/regions/{region}/operations", s.handleOperations)
 	m.HandleFunc("/regions/{region}/ingest", s.handleIngest)
 	m.HandleFunc("/regions/{region}/journal/verify", s.handleVerifyJournal)
+
+	// In-region spatial aggregation: boundary catalog, spatial policy,
+	// summaries, segment ledger, width backfill and dedupe evidence.
+	m.HandleFunc("/regions/{region}/spatial/boundaries", s.handleSpatialBoundaries)
+	m.HandleFunc("/regions/{region}/spatial/boundaries/invalidate", s.handleSpatialBoundaryInvalidate)
+	m.HandleFunc("/regions/{region}/spatial/policies", s.handleSpatialPolicies)
+	m.HandleFunc("/regions/{region}/spatial/summaries", s.handleRegionSpatialSummaries)
+	m.HandleFunc("/regions/{region}/spatial/summaries/{sid}", s.handleRegionSpatialSummary)
+	m.HandleFunc("/regions/{region}/spatial/summaries/{sid}/ledger", s.handleRegionSpatialLedger)
+	m.HandleFunc("/regions/{region}/spatial/width-backfill", s.handleSpatialWidthBackfill)
+	m.HandleFunc("/regions/{region}/spatial/dedup-log", s.handleSpatialDedupLog)
+
+	// Group-side spatial egress: confirmed sanitised replicas and the delivery
+	// gate with pre-send re-validation and hash verification.
+	m.HandleFunc("/spatial/summaries", s.handleGroupSpatialSummaries)
+	m.HandleFunc("/spatial/deliveries", s.handleGroupSpatialDeliveries)
+	m.HandleFunc("/spatial/deliveries/{id}/verify", s.handleGroupSpatialDeliveryVerify)
 
 	// Replication control plane.
 	m.HandleFunc("/replication/links", s.handleLinks)
@@ -930,9 +949,14 @@ func (s *Server) handleSummary(w http.ResponseWriter, r *http.Request) {
 			"replication_link": st.LinkStatus, "handover_ready": st.HandoverReady,
 		})
 	}
+	spatialDeliveries, err := s.svc.CountSpatialDeliveries(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"regions": regions, "cursors": cursors, "links": links, "replicas": stats,
-		"dr": dr, "policies": policies,
+		"dr": dr, "policies": policies, "spatial_delivery_count": spatialDeliveries,
 	})
 }
 

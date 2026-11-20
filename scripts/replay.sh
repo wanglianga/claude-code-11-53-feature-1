@@ -353,7 +353,166 @@ out_of_scope=$(api POST /aggregates "$TOK_ANALYST" "$(jq -n --arg a "$wide_apr" 
   metric_keys:["operation_count","fuel_l"]}')")
 check "metric outside the approval scope is refused" "$(jq -r .error.code <<<"$out_of_scope")" "forbidden"
 
-section "5. outbound delivery and audit chain"
+section "5. in-region spatial aggregation and residency-safe egress"
+# Everything spatial happens inside BR-MT; the group only ever receives the
+# approved-grain sanitised artifact. api() takes a bare token (it adds the
+# Authorization header itself).
+OPR="demo-operator-br-mt"
+bdv1=$(api POST /regions/BR-MT/spatial/boundaries "$OPR" "@$S/spatial/br-mt-boundaries-v1.json" | tee "$TMP/bdv1.json" | jq -r .version_id)
+check "boundary v1 is versioned and hashed" "$bdv1" "bdv_br_mt_1"
+check "boundary v1 covers two counties" "$(jq -r .county_count "$TMP/bdv1.json")" "2"
+bdv2=$(api POST /regions/BR-MT/spatial/boundaries "$OPR" "@$S/spatial/br-mt-boundaries-v2.json" | jq -r .version_id)
+check "boundary correction gets a new version" "$bdv2" "bdv_br_mt_2"
+check "previous boundary version is superseded, not deleted" \
+  "$(api GET /regions/BR-MT/spatial/boundaries "$OPR" | jq -r '.boundary_versions[]|select(.version_id=="bdv_br_mt_1").status')" "superseded"
+
+# Re-activate v1 for the main drill.
+api POST /regions/BR-MT/spatial/boundaries "$OPR" "@$S/spatial/br-mt-boundaries-v1.json" > "$TMP/bdv1b.json"
+check "re-publishing v1 restores an active catalog" "$(jq -r .status "$TMP/bdv1b.json")" "active"
+spp1=$(api POST /regions/BR-MT/spatial/policies "$OPR" "@$S/spatial/policy-intersection-county.json" | jq -r .policy_id)
+check "intersection/county spatial policy is active" \
+  "$(api GET /regions/BR-MT/spatial/policies "$OPR" | jq -r '.policies[]|select(.policy_id=="'$spp1'").status')" "active"
+# Grid output below the approved minimum resolution is refused.
+coarse=$(curl -s -XPOST "$BASE/regions/BR-MT/spatial/policies" -H "Authorization: Bearer $OPR" -H 'Content-Type: application/json' \
+  -d '{"boundary_version_id":"bdv_br_mt_1","output_grain":"grid","method":"raster","grid_size_m":50}' | jq -r .error.code)
+check "sub-100m grid resolution is refused" "$coarse" "invalid_request"
+
+api POST /regions/BR-MT/ingest "$OPR" "@$S/spatial/br-mt-batch-a.json" > "$TMP/sp-a.json"
+check "spatial batch A accepted" "$(jq -r .accepted "$TMP/sp-a.json")" "3"
+api POST /regions/BR-MT/ingest "$OPR" "@$S/spatial/br-mt-batch-b.json" > "$TMP/sp-b.json"
+check "spatial batch B repeats one segment and adds one" "$(jq -r .duplicates "$TMP/sp-b.json")" "1"
+check "spatial batch B accepts only the new segment" "$(jq -r .accepted "$TMP/sp-b.json")" "1"
+check "duplicate reception is logged as dedupe evidence" \
+  "$(sql_region br_mt "select count(*) from segment_dedup_log where segment_id='SP-CROSS-1'")" "1"
+
+spbody=$(jq -n '{period_from:"2026-11-06T00:00:00Z",period_to:"2026-11-30T00:00:00Z"}')
+s1=$(api POST /regions/BR-MT/spatial/summaries "$OPR" "$spbody" | tee "$TMP/sp-s1.json" | jq -r .summary_id)
+check "spatial summary sees four distinct segments" "$(jq -r .source_segment_count "$TMP/sp-s1.json")" "4"
+check "spatial summary reports the duplicate instead of doubling it" "$(jq -r .duplicate_count "$TMP/sp-s1.json")" "1"
+check "cross-county run is apportioned to both counties" \
+  "$(jq -r '[.bins[]|select(.unit_type=="county")|.county_code]|sort|join(",")' "$TMP/sp-s1.json")" "MT-C1,MT-C2"
+check "every allocated county bin carries positive worked area" \
+  "$(jq -r '[.bins[].area_ha|select(.<=0)]|length' "$TMP/sp-s1.json")" "0"
+check "low-accuracy border fragment is held unallocated" \
+  "$(jq -r '[.pending[]|select(.reason|startswith("uncertainty_crosses_boundary"))]|length' "$TMP/sp-s1.json")" "1"
+check "width-missing segment is held unallocated" \
+  "$(jq -r '[.pending[]|select(.reason|startswith("working_width_missing"))]|length' "$TMP/sp-s1.json")" "1"
+check "ambiguous fragment names both candidate counties" \
+  "$(jq -r '[.excluded_fragments[]|select(.reason=="uncertainty_crosses_boundary").candidate_counties[]]|unique|sort|join(",")' "$TMP/sp-s1.json")" "MT-C1,MT-C2"
+check "ambiguous area is reported as a conservative county upper bound" \
+  "$(jq -r '[.bins[]|select(.area_ha_max>.area_ha)]|length' "$TMP/sp-s1.json")" "2"
+api GET "/regions/BR-MT/spatial/summaries/$s1/ledger" "$OPR" > "$TMP/sp-ledger.json"
+check "ledger marks the width-missing segment pending" \
+  "$(jq -r '.ledger[]|select(.segment_id=="SP-NOWIDTH-1")|.status' "$TMP/sp-ledger.json")" "pending"
+check "ledger marks the cross-county segment allocated" \
+  "$(jq -r '.ledger[]|select(.segment_id=="SP-CROSS-1")|.status' "$TMP/sp-ledger.json")" "allocated"
+check "ledger allocation plus ambiguity covers the whole run" \
+  "$(jq -r '[.ledger[]|select(.segment_id=="SP-CROSS-1")|((.allocated_length_m+.ambiguous_length_m)>0)]|all' "$TMP/sp-ledger.json")" "true"
+
+# Width backfill moves the pending segment into the county totals on recompute.
+api POST /regions/BR-MT/spatial/width-backfill "$OPR" '{"items":[{"device_serial":"BR-FERT-7703","segment_id":"SP-NOWIDTH-1","working_width_m":10.0}]}' > "$TMP/sp-wf.json"
+check "width backfill updates one segment" "$(jq -r .updated_segments "$TMP/sp-wf.json")" "1"
+s2=$(api POST /regions/BR-MT/spatial/summaries "$OPR" "$spbody" | tee "$TMP/sp-s2.json" | jq -r .summary_id)
+check "recomputation supersedes the previous summary" "$(jq -r .supersedes_summary_id "$TMP/sp-s2.json")" "$s1"
+check "previous summary is retained as superseded" \
+  "$(api GET "/regions/BR-MT/spatial/summaries/$s1" "$OPR" | jq -r .status)" "superseded"
+check "width-missing pending bucket disappears after backfill" \
+  "$(jq -r '[.pending[]|select(.reason|startswith("working_width_missing"))]|length' "$TMP/sp-s2.json")" "0"
+
+# Policy-filtered replication carries the sanitised summary, never raw points.
+api POST /replication/run "$TOK_ADMIN" '{"region":"BR-MT"}' > "$TMP/sp-repl.json"
+check "spatial_summary category is replicated" \
+  "$(jq -r '.copied_by_category.spatial_summary>0' "$TMP/sp-repl.json")" "true"
+check "raw trajectories stay blocked while spatial summaries flow" \
+  "$(jq -r '.blocked_by_category.raw_trajectory>0' "$TMP/sp-repl.json")" "true"
+api GET /replication/replicas "$TOK_ADMIN" > "$TMP/sp-stats.json"
+check "group store holds a BR-MT spatial replica" \
+  "$(jq -r '.spatial_summaries_by_region["BR-MT"]>0' "$TMP/sp-stats.json")" "true"
+check "group store still holds zero BR-MT raw trajectories" \
+  "$(jq -r '.raw_trajectories_by_region["BR-MT"] // 0' "$TMP/sp-stats.json")" "0"
+api GET "/spatial/summaries?region=BR-MT" "$TOK_ANALYST" > "$TMP/sp-group.json"
+check "group side receives only county-grain bins under the county policy" \
+  "$(jq -r '[.spatial_summaries[].bins[]|select(.unit_type=="grid")]|length' "$TMP/sp-group.json")" "0"
+check "every group-visible spatial artifact declares no raw trajectories" \
+  "$(jq -r '[.spatial_summaries[]|select(.contains_raw_trajectories!=false)]|length' "$TMP/sp-group.json")" "0"
+check "group artifact carries the boundary and policy provenance" \
+  "$(jq -r '[.spatial_summaries[]|select(.boundary_version_id=="bdv_br_mt_1" and (.policy_id|length)>0)]|length>0' "$TMP/sp-group.json")" "true"
+check "group analyst has no path to the regional excluded-fragment ledger" \
+  "$(api GET "/regions/BR-MT/spatial/summaries/$s1/ledger" "$TOK_ANALYST" | jq -r .error.code)" "forbidden"
+check "other-region operator cannot manage BR-MT boundaries" \
+  "$(api POST /regions/BR-MT/spatial/boundaries "demo-operator-de-bb" "@$S/spatial/br-mt-boundaries-v1.json" | jq -r .error.code)" "forbidden"
+# Byte-level guarantee: no coordinate JSON keys exist in the control-plane
+# replica. (The artifact notes mention the word "trajectories" in prose; the
+# assertion matches quoted keys only, exactly like the delivery field scanner.)
+check "control-plane spatial bytes contain no lat/lon/points keys" \
+  "$(sql_control "select count(*) from replica_spatial_summaries where artifact ~* '\"(lat|lon|points|trajectory)\"'")" "0"
+check "region database still holds the authoritative raw trajectories" \
+  "$(sql_region br_mt "select count(*) from operation_events where point_count>0 and segment_id like 'SP-%'")" "4"
+
+# Raster method: county rollup and approved grid grain are both available.
+spp_rc=$(api POST /regions/BR-MT/spatial/policies "$OPR" "@$S/spatial/policy-raster-county.json" | jq -r .policy_id)
+api POST /regions/BR-MT/spatial/summaries "$OPR" "$spbody" > "$TMP/sp-rc.json"
+check "raster/county policy emits only county bins" \
+  "$(jq -r '[.bins[]|select(.unit_type!="county")]|length' "$TMP/sp-rc.json")" "0"
+check "raster method records cells touched per county" \
+  "$(jq -r '[.bins[].grid_cells_touched|select(.<1)]|length' "$TMP/sp-rc.json")" "0"
+spp_rg=$(api POST /regions/BR-MT/spatial/policies "$OPR" "@$S/spatial/policy-raster-grid.json" | jq -r .policy_id)
+api POST /regions/BR-MT/spatial/summaries "$OPR" "$spbody" > "$TMP/sp-rg.json"
+check "raster/grid policy emits opaque grid bins at the approved resolution" \
+  "$(jq -r '[.bins[]|select(.unit_type=="grid" and (.unit_code|startswith("c200_")))]|length>0' "$TMP/sp-rg.json")" "true"
+check "grid bins never embed coordinates (opaque cell codes only)" \
+  "$(jq -r '[.bins[].unit_code|test("[0-9]+\\\\.[0-9]+")]|any' "$TMP/sp-rg.json")" "false"
+
+# Delivery gate for spatial egress.
+sapr=$(api POST /outbound/requests "$TOK_ANALYST" "@$S/approvals/spatial.json" | jq -r .id)
+api POST "/outbound/requests/$sapr/decide" "$TOK_APPROVER" '{"decision":"approved","note":"spatial drill"}' >/dev/null
+# Re-publish the intersection/county policy so the latest summary is county-grain.
+api POST /regions/BR-MT/spatial/policies "$OPR" "@$S/spatial/policy-intersection-county.json" >/dev/null
+slatest=$(api POST /regions/BR-MT/spatial/summaries "$OPR" "$spbody" | jq -r .summary_id)
+api POST /replication/run "$TOK_ADMIN" '{"region":"BR-MT"}' >/dev/null
+sdlv=$(api POST /spatial/deliveries "$TOK_ANALYST" "$(jq -n --arg r BR-MT --arg s "$slatest" --arg a "$sapr" \
+  '{source_region:$r,summary_id:$s,approval_id:$a}')" | tee "$TMP/sp-dlv.json" | jq -r .id)
+check "spatial delivery is sent after all gate checks pass" "$(jq -r .status "$TMP/sp-dlv.json")" "sent"
+check "spatial delivery has no failed check" \
+  "$(jq -r '[.checks[]|select(.passed==false)]|length' "$TMP/sp-dlv.json")" "0"
+check "delivered spatial artifact is county-only" \
+  "$(jq -r '[.artifact.bins[]|select(.unit_type!="county")]|length' "$TMP/sp-dlv.json")" "0"
+api GET "/spatial/deliveries/$sdlv/verify" "$TOK_AUDITOR" > "$TMP/sp-dlvverify.json"
+check "spatial artifact re-hashes to the recorded digest" "$(jq -r .sha256_matches "$TMP/sp-dlvverify.json")" "true"
+check "spatial artifact verification finds no restricted fields" \
+  "$(jq -r '(.restricted_fields//[])|length' "$TMP/sp-dlvverify.json")" "0"
+check "spatial delivery audit entry validates" "$(jq -r .audit_entry_valid "$TMP/sp-dlvverify.json")" "true"
+check "spatial delivery verifies against the audit chain" "$(jq -r .audit_chain_valid "$TMP/sp-dlvverify.json")" "true"
+# Revocation blocks the next spatial delivery and exposes no artifact.
+api POST "/outbound/requests/$sapr/revoke" "$TOK_APPROVER" '{"reason":"spatial drill revocation"}' >/dev/null
+blocked=$(api POST /spatial/deliveries "$TOK_ANALYST" "$(jq -n --arg r BR-MT --arg s "$slatest" --arg a "$sapr" \
+  '{source_region:$r,summary_id:$s,approval_id:$a}')")
+check "revoked approval blocks spatial delivery" "$(jq -r .status <<<"$blocked")" "blocked"
+check "blocked spatial delivery exports no artifact" "$(jq -r .artifact <<<"$blocked")" "null"
+
+# Boundary revision creates a new linked summary; historical group reports keep
+# naming the grain and boundary they originally used.
+api POST /regions/BR-MT/spatial/boundaries "$OPR" "@$S/spatial/br-mt-boundaries-v2.json" >/dev/null
+api POST /regions/BR-MT/spatial/policies "$OPR" "@$S/spatial/policy-intersection-county-v2.json" >/dev/null
+s3=$(api POST /regions/BR-MT/spatial/summaries "$OPR" "$spbody" | jq -r .summary_id)
+check "revision summary uses boundary v2" \
+  "$(api GET "/regions/BR-MT/spatial/summaries/$s3" "$OPR" | jq -r .boundary_version_id)" "bdv_br_mt_2"
+check "revision summary continues the county-grain lineage" \
+  "$(api GET "/regions/BR-MT/spatial/summaries/$s3" "$OPR" | jq -r '.supersedes_summary_id|length>0')" "true"
+api POST /replication/run "$TOK_ADMIN" '{"region":"BR-MT"}' >/dev/null
+check "group side can still see reports computed under both boundary versions" \
+  "$(api GET "/spatial/summaries?region=BR-MT" "$TOK_ANALYST" | jq -r '[.spatial_summaries[].boundary_version_id]|unique|length>=2')" "true"
+
+# An invalid boundary holds every segment pending instead of guessing a side.
+api POST /regions/BR-MT/spatial/boundaries/invalidate "$OPR" '{"version_id":"bdv_br_mt_2"}' >/dev/null
+api POST /regions/BR-MT/spatial/summaries "$OPR" "$spbody" > "$TMP/sp-invalid.json"
+check "invalid boundary allocates no area" "$(jq -r '(.bins|length)' "$TMP/sp-invalid.json")" "0"
+check "invalid boundary lists every segment as boundary_version_invalid" \
+  "$(jq -r '[.pending[]|select(.reason|startswith("boundary_version_invalid"))]|length' "$TMP/sp-invalid.json")" "1"
+check "invalid boundary pending area covers all received segments" \
+  "$(jq -r '.pending[0].segment_count' "$TMP/sp-invalid.json")" "4"
+
+section "6. outbound delivery and audit chain"
 apr4=$(api POST /outbound/requests "$TOK_ANALYST" "@$S/approvals/wide.json" | jq -r .id)
 api POST "/outbound/requests/$apr4/decide" "$TOK_APPROVER" '{"decision":"approved"}' >/dev/null
 run4=$(api POST /aggregates "$TOK_ANALYST" "$(jq --arg a "$apr4" '.approval_id=$a' <<<"$aggbody")" | jq -r .id)

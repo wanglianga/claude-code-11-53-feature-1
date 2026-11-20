@@ -1,0 +1,130 @@
+{
+  "batch_id": "spatial-batch-a",
+  "operations": [
+    {
+      "device_serial": "BR-SEED-7701",
+      "segment_id": "SP-CROSS-1",
+      "operation_type": "seeding",
+      "field_id": "MT-F-SP",
+      "area_ha": 2.09,
+      "fuel_l": 17.77,
+      "duration_s": 1800,
+      "completed": true,
+      "started_at": "2026-11-06T08:00:00Z",
+      "ended_at": "2026-11-06T08:30:00Z",
+      "points": [
+        {
+          "lat": -12.64,
+          "lon": -55.428,
+          "at": "2026-11-06T08:00:00Z"
+        },
+        {
+          "lat": -12.64,
+          "lon": -55.4248,
+          "at": "2026-11-06T08:06:00Z"
+        },
+        {
+          "lat": -12.64,
+          "lon": -55.4216,
+          "at": "2026-11-06T08:12:00Z"
+        },
+        {
+          "lat": -12.64,
+          "lon": -55.4184,
+          "at": "2026-11-06T08:18:00Z"
+        },
+        {
+          "lat": -12.64,
+          "lon": -55.4152,
+          "at": "2026-11-06T08:24:00Z"
+        },
+        {
+          "lat": -12.64,
+          "lon": -55.412,
+          "at": "2026-11-06T08:30:00Z"
+        }
+      ],
+      "alarms": [],
+      "accuracy_m": 2.0,
+      "working_width_m": 12.0
+    },
+    {
+      "device_serial": "BR-HARV-7702",
+      "segment_id": "SP-LOWACC-1",
+      "operation_type": "seeding",
+      "field_id": "MT-F-SP",
+      "area_ha": 1.04,
+      "fuel_l": 8.84,
+      "duration_s": 1200,
+      "completed": true,
+      "started_at": "2026-11-06T12:00:00Z",
+      "ended_at": "2026-11-06T12:20:00Z",
+      "points": [
+        {
+          "lat": -12.635,
+          "lon": -55.424,
+          "at": "2026-11-06T12:00:00Z"
+        },
+        {
+          "lat": -12.635,
+          "lon": -55.42,
+          "at": "2026-11-06T12:08:00Z"
+        },
+        {
+          "lat": -12.635,
+          "lon": -55.416,
+          "at": "2026-11-06T12:16:00Z"
+        }
+      ],
+      "alarms": [],
+      "accuracy_m": 2.0,
+      "working_width_m": 12.0,
+      "point_accuracy_m": [
+        2.0,
+        60.0,
+        2.0
+      ]
+    },
+    {
+      "device_serial": "BR-FERT-7703",
+      "segment_id": "SP-NOWIDTH-1",
+      "operation_type": "seeding",
+      "field_id": "MT-F-SP",
+      "area_ha": 0.6,
+      "fuel_l": 5.1,
+      "duration_s": 900,
+      "completed": true,
+      "started_at": "2026-11-06T16:00:00Z",
+      "ended_at": "2026-11-06T16:15:00Z",
+      "points": [
+        {
+          "lat": -12.645,
+          "lon": -55.428,
+          "at": "2026-11-06T16:00:00Z"
+        },
+        {
+          "lat": -12.645,
+          "lon": -55.427,
+          "at": "2026-11-06T16:05:00Z"
+        },
+        {
+          "lat": -12.645,
+          "lon": -55.425999999999995,
+          "at": "2026-11-06T16:10:00Z"
+        },
+        {
+          "lat": -12.645,
+          "lon": -55.425,
+          "at": "2026-11-06T16:15:00Z"
+        },
+        {
+          "lat": -12.645,
+          "lon": -55.424,
+          "at": "2026-11-06T16:20:00Z"
+        }
+      ],
+      "alarms": [],
+      "accuracy_m": 2.0
+    }
+  ]
+}
